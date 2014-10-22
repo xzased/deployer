@@ -1,0 +1,127 @@
+from __future__ import with_statement
+from fabric.api import *
+from fabric.contrib.console import confirm
+
+
+env.project_name = $project_name
+env.user = $user
+env.path = '/etc/webapps/%s' % env.project_name
+env.hosts = $hosts
+
+
+def test():
+    "Run the test suite and bail out if it fails"
+    local("$(env.python_bin) manage.py test", fail="abort")
+
+def setup():
+    """
+    Setup a fresh virtualenv as well as a few useful directories, then run
+    a full deployment
+    """
+    require('hosts', provided_by=[local])
+    require('path')
+    run('mkdir -p %s/env; cd %s/env; pyvenv .' % (env.path, env.path), quiet=True)
+    run('cd %s; mkdir -p releases; mkdir -p packages; mkdir -p media' % env.path)
+    deploy()
+
+def deploy():
+    """
+    Deploy the latest version of the site to the servers, install any
+    required third party modules, install the virtual host and
+    then restart the webserver
+    """
+    require('hosts', provided_by=[local])
+    require('path')
+
+    import time
+    env.release = time.strftime('%Y%m%d%H%M%S')
+
+    upload_tar_from_git()
+    install_requirements()
+    install_site()
+    symlink_current_release()
+    migrate()
+    restart_webserver()
+
+def deploy_version(version):
+    "Specify a specific version to be made live"
+    require('hosts', provided_by=[local])
+    require('path')
+
+    env.version = version
+    run('cd %s; rm releases/previous; mv releases/current releases/previous;' % env.path)
+    run('ln -s %s releases/current' % env.version)
+    restart_webserver()
+
+def rollback():
+    """
+    Limited rollback capability. Simple loads the previously current
+    version of the code. Rolling back again will swap between the two.
+    """
+    require('hosts', provided_by=[local])
+    require('path')
+
+    run('cd %s; mv releases/current releases/_previous;' % env.path)
+    run('cd %s; mv releases/previous releases/current;' % env.path)
+    run('cd %s; mv releases/_previous releases/previous;' % env.path)
+    restart_webserver()
+
+# Helpers. These are called by other functions rather than directly
+
+def upload_tar_from_git():
+    require('release', provided_by=[deploy, setup])
+    "Create an archive from the current Git master branch and upload it"
+    local('git archive --format=tar master | gzip > %s.tar.gz' % env.release)
+    run('mkdir %s/releases/%s' % (env.path, env.release))
+    put('%s.tar.gz' % env.release, '%s/packages/' % env.path)
+    run('cd %s/releases/%s && tar zxf ../../packages/%s.tar.gz' % (env.path, env.release, env.release))
+    local('rm %s.tar.gz' % env.release)
+
+def collect():
+    "Collect static files"
+    require('release', provided_by=[deploy, setup])
+    require('path')
+    run('cd %s/releases/%s; source ../../env/bin/activate; ./manage.py collectstatic' % (env.path, env.release))
+
+def owner():
+    "Set owner to web user"
+    require('path')
+    sudo('chown -R http:http %s' % env.path)
+    sudo('chmod -R g+w %s' % env.path)
+
+def install_site():
+    "Add the virtualhost file to apache"
+    require('release', provided_by=[deploy, setup])
+    require('project_name')
+    sudo('cp %s/releases/%s/%s.conf /etc/nginx/conf.d/' % (env.path, env.release, env.project_name))
+    sudo('cp %s/releases/%s/%s.ini /etc/uwsgi/' % (env.path, env.release, env.project_name))
+    sudo('systemctl enable uwsgi@%s' % env.project_name)
+    collect()
+    owner()
+
+def install_requirements():
+    "Install the required packages from the requirements file using pip"
+    require('release', provided_by=[deploy, setup])
+    run('cd %s/env; source bin/activate; pip install -r ../releases/%s/requirements.txt' % (env.path, env.release))
+
+def symlink_current_release():
+    "Symlink our current release"
+    require('release', provided_by=[deploy, setup])
+    run('cd %s; rm releases/previous; mv releases/current releases/previous;' % env.path, quiet=True)
+    run('cd %s; ln -s %s releases/current' % (env.path, env.release))
+
+def sync():
+    "Initialize the database"
+    require('path')
+    run('cd %s/releases/current; source ../../env/bin/activate; ./manage.py syncdb' % env.path)
+
+def migrate():
+    "Update the database"
+    require('path')
+    run('cd %s/releases/current; source ../../env/bin/activate; ./manage.py makemigrations; ./manage.py migrate' % env.path)
+
+def restart_webserver():
+    "Restart the web server"
+    require('project_name')
+    sudo('systemctl restart uwsgi@%s' % env.project_name)
+    sudo('systemctl reload nginx')
