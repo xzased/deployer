@@ -1,0 +1,5 @@
+{
+    "project_name": "My Project",
+    "user": "some_user",
+    "hosts": ["host1"]
+}

@@ -1,6 +1,10 @@
 import os
+import json
+import shutil
 from fabric.api import task, require, local
 
+
+TEMPLATE_KEYS = ['project_name', 'user', 'hosts']
 
 def setup():
     """
@@ -20,6 +24,7 @@ def set_variables():
     prompt('User path:', key='path', default='%s/git' %  os.path.expanduser('~'))
     prompt('Hosts:', key='hosts', default=['node'])
     prompt('User:', key='user', default='deployer')
+    env.project_path = '%s/%s' % (env.path, env.project_name)
 
 
 def start_project():
@@ -42,15 +47,17 @@ def install_environment():
 
 def fab_template():
     """
-    Parse and install fabfile template/
+    Parse environment and install fabfile template.
     """
-    require('path')
-    
-    local('git archive --format=tar master | gzip > %s.tar.gz' % env.release)
-    run('mkdir %s/releases/%s' % (env.path, env.release))
-    put('%s.tar.gz' % env.release, '%s/packages/' % env.path)
-    run('cd %s/releases/%s && tar zxf ../../packages/%s.tar.gz' % (env.path, env.release, env.release))
-    local('rm %s.tar.gz' % env.release)
+    require('project_path', provided_by=[set_variables])
+    with open('environment.json', 'r') as f:
+        json_data = json.loads(f.read())
+    [(json_data[key] = env.get(key)) for key in json_data.keys()]
+
+    with open('%s/environment.json' % env.project_path, 'w') as f:
+        f.write(json.dumps(json_data))
+
+    shutil.copy('fabfile.template', '%s/fabfile.py' % env.project_path)
 
 def collect():
     "Collect static files"
