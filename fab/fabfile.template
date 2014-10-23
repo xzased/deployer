@@ -125,3 +125,12 @@ def restart_webserver():
     require('project_name')
     sudo('systemctl restart uwsgi@%s' % env.project_name)
     sudo('systemctl reload nginx')
+
+def bootswatch():
+    """
+    Download and install bootswatch theme.
+    """
+    require('project_name')
+    prompt('Theme:', key='theme')
+    local('wget http://bootswatch.com/%s/bootstrap.min.css' % env.theme)
+    shutil.move('bootstrap.min.css', '%s/static/css/bootstrap.min.css' % env.project_name)

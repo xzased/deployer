@@ -1,21 +1,27 @@
 import os
 import json
 import shutil
-from fabric.api import task, require, local
+from fabric.api import task, require, local, prompt, env, lcd, prefix
 
 
-TEMPLATE_KEYS = ['project_name', 'user', 'hosts']
-
+@task
 def setup():
     """
-    Setup a fresh virtualenv as well as a few useful directories, then run
-    a full deployment
+    Setup a fresh virtualenv as well as a few useful directories.
     """
-    require('path')
-    run('mkdir -p %s/env; cd %s/env; pyvenv .' % (env.path, env.path), quiet=True)
-    run('cd %s; mkdir -p releases; mkdir -p packages; mkdir -p media' % env.path)
-    deploy()
+    set_variables()
+    install_environment()
+    start_project()
+    modify_settings()
+    bootstrap()
+    fab_template()
+    conf_scripts()
+    bootstrap()
+    if env.theme:
+        bootswatch()
+    git()
 
+@task
 def set_variables():
     """
     Prompt and set project variables.
@@ -24,26 +30,55 @@ def set_variables():
     prompt('User path:', key='path', default='%s/git' %  os.path.expanduser('~'))
     prompt('Hosts:', key='hosts', default=['node'])
     prompt('User:', key='user', default='deployer')
+    prompt('Bootstrap:', key='bootstrap', default='3.2.0')
+    prompt('Theme:', key='theme')
     env.project_path = '%s/%s' % (env.path, env.project_name)
 
-
+@task
 def start_project():
     """
     Start the django project.
     """
-    require('path')
-    require('project_name')
+    require('project_name', provided_by=[set_variables])
+    require('project_path', provided_by=[set_variables])
+    with lcd(env.path), prefix('source ~/.virtualenvs/%s/bin/activate' % env.project_name):
+        local('django-admin.py startproject %s;' % env.project_name)
+        with lcd(env.project_path):
+            local('mkdir -p static; mkdir -p media; mkdir -p templates;')
+            local('mkdir -p %s/static;' % env.project_name)
 
-    local('workon %s; cd %s; django-admin.py startproject %s;' % (env.project_name, .path, env.project_name))
+def replace_and_write(source, destination, mode='w', replace=None):
+    with open(source, 'r') as f:
+        data = f.read()
+        if replace:
+            data = data.replace('$%s' % replace, env[replace])
+    with open(destination, mode) as f:
+        f.write(data)
 
+@task
+def modify_settings():
+    """
+    Modify Django settings.
+    """
+    require('project_name', provided_by=[set_variables])
+    require('project_path', provided_by=[set_variables])
+    settings_path = '%s/%s' % (env.project_path, env.project_name)
+    settings = '%s/settings.py' % settings_path
+    replace_and_write('django/django.conf', settings, mode='a')
+    shutil.copy(settings, '%s/settings-dev.py' % settings_path)
+    shutil.copy('django/urls-dev.template', '%s/urls-dev.py' % settings_path)
+
+@task
 def install_environment():
     """
     Create virtual environment, install Django.
     """
-    require('project_name')
-
-    local('mkvirtualenv --no-site-packages --python=/usr/bin/python3 %s; pip install Django' % env.project_name)
-
+    require('project_name', provided_by=[set_variables])
+    require('project_path', provided_by=[set_variables])
+    require('project_name', provided_by=[set_variables])
+    local('pyvenv ~/.virtualenvs/%s' % env.project_name)
+    with prefix('source ~/.virtualenvs/%s/bin/activate' % env.project_name):
+        local('pip install Django')
 
 def fab_template():
     """
@@ -52,58 +87,62 @@ def fab_template():
     require('project_path', provided_by=[set_variables])
     with open('environment.json', 'r') as f:
         json_data = json.loads(f.read())
-    [(json_data[key] = env.get(key)) for key in json_data.keys()]
-
+    for key in json_data.keys():
+        json_data[key] = env.get(key)
     with open('%s/environment.json' % env.project_path, 'w') as f:
         f.write(json.dumps(json_data))
+    shutil.copy('fab/fabfile.template', '%s/fabfile.py' % env.project_path)
 
-    shutil.copy('fabfile.template', '%s/fabfile.py' % env.project_path)
+@task
+def conf_scripts():
+    """
+    Parse and copy nginx and uwsgi conf scripts.
+    """
+    require('project_name', provided_by=[set_variables])
+    require('project_path', provided_by=[set_variables])
+    nginx_dest = '%s/%s.conf' % (env.project_path, env.project_name)
+    replace_and_write('conf/nginx.conf', nginx_dest, replace='project_name')
+    uwsgi_dest = '%s/%s.ini' % (env.project_path, env.project_name)
+    replace_and_write('conf/uwsgi.ini', uwsgi_dest, replace='project_name')
+    kate_dest = '%s/.kateproject' % env.project_path
+    replace_and_write('conf/kateproject', kate_dest, replace='project_name')
 
-def collect():
-    "Collect static files"
-    require('release', provided_by=[deploy, setup])
-    require('path')
-    run('cd %s/releases/%s; source ../../env/bin/activate; ./manage.py collectstatic' % (env.path, env.release))
+@task
+def bootstrap():
+    """
+    Download and extract bootstrap.
+    """
+    require('bootstrap', provided_by=[set_variables])
+    require('project_name', provided_by=[set_variables])
+    bootstrap_base = 'https://github.com/twbs/bootstrap/releases/download/v%s' % env.bootstrap
+    bootstrap_dist = 'bootstrap-%s-dist.zip' % env.bootstrap
+    bootstrap_url = '%s/%s' % (bootstrap_base, bootstrap_dist)
+    with lcd(env.project_path):
+        local('wget %s' % bootstrap_url)
+        local('unzip -j -o %s %s/css/* -d %s/static/css/' % (bootstrap_dist, bootstrap_dist.replace('.zip', ''), env.project_name))
+        local('unzip -j -o %s %s/js/* -d %s/static/js/' % (bootstrap_dist, bootstrap_dist.replace('.zip', ''), env.project_name))
+        local('unzip -j -o %s %s/fonts/* -d %s/static/fonts/' % (bootstrap_dist, bootstrap_dist.replace('.zip', ''), env.project_name))
+        local('rm %s' % bootstrap_dist)
 
-def owner():
-    "Set owner to web user"
-    require('path')
-    sudo('chown -R http:http %s' % env.path)
-    sudo('chmod -R g+w %s' % env.path)
+@task
+def bootswatch():
+    """
+    Download and install bootswatch theme.
+    """
+    require('theme', provided_by=[set_variables])
+    require('project_name', provided_by=[set_variables])
+    with lcd(env.project_path):
+        local('wget http://bootswatch.com/%s/bootstrap.min.css' % env.theme)
+        local('mv bootstrap.min.css %s/static/css/bootstrap.min.css' % env.project_name)
 
-def install_site():
-    "Add the virtualhost file to apache"
-    require('release', provided_by=[deploy, setup])
-    require('project_name')
-    sudo('cp %s/releases/%s/%s.conf /etc/nginx/conf.d/' % (env.path, env.release, env.project_name))
-    sudo('cp %s/releases/%s/%s.ini /etc/uwsgi/' % (env.path, env.release, env.project_name))
-    sudo('systemctl enable uwsgi@%s' % env.project_name)
-    collect()
-    owner()
-
-def install_requirements():
-    "Install the required packages from the requirements file using pip"
-    require('release', provided_by=[deploy, setup])
-    run('cd %s/env; source bin/activate; pip install -r ../releases/%s/requirements.txt' % (env.path, env.release))
-
-def symlink_current_release():
-    "Symlink our current release"
-    require('release', provided_by=[deploy, setup])
-    run('cd %s; rm releases/previous; mv releases/current releases/previous;' % env.path, quiet=True)
-    run('cd %s; ln -s %s releases/current' % (env.path, env.release))
-
-def sync():
-    "Initialize the database"
-    require('path')
-    run('cd %s/releases/current; source ../../env/bin/activate; ./manage.py syncdb' % env.path)
-
-def migrate():
-    "Update the database"
-    require('path')
-    run('cd %s/releases/current; source ../../env/bin/activate; ./manage.py makemigrations; ./manage.py migrate' % env.path)
-
-def restart_webserver():
-    "Restart the web server"
-    require('project_name')
-    sudo('systemctl restart uwsgi@%s' % env.project_name)
-    sudo('systemctl reload nginx')
+@task
+def git():
+    """
+    Initialize git.
+    """
+    require('project_path', provided_by=[set_variables])
+    with lcd(env.project_path):
+        local('git init')
+    local('cp git/gitignore %s/.gitignore' % env.project_path)
+    with lcd(env.project_path):
+        local('git add -A; git commit -m "Initial commit."')

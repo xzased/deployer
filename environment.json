@@ -1,5 +1,7 @@
 {
     "project_name": "My Project",
     "user": "some_user",
-    "hosts": ["host1"]
+    "hosts": ["host1"],
+    "bootstrap": "3.2.0",
+    "theme": null
 }
