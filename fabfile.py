@@ -91,7 +91,7 @@ def fab_template():
         json_data[key] = env.get(key)
     with open('%s/environment.json' % env.project_path, 'w') as f:
         f.write(json.dumps(json_data))
-    shutil.copy('fab/fabfile.template', '%s/fabfile.py' % env.project_path)
+    replace_and_write('fab/fabfile.template', '%s/fabfile.py' % env.project_path, replace='project_name')
 
 @task
 def conf_scripts():
