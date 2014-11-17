@@ -1,8 +1,10 @@
 import shutil
 import json
+import os
 from fabric.api import *
 
 
+@task
 def environment():
     """
     Set environment vars.
@@ -13,12 +15,14 @@ def environment():
         env[key] = json_data.get(key)
     env.path = '/etc/webapps/%s' % env.project_name
 
+@task
 def test():
     """
     Run the test suite and bail out if it fails.
     """
     local("manage.py test", fail="abort")
 
+@task
 def setup():
     """
     Setup a fresh virtualenv as well as a few useful directories, then run
@@ -30,6 +34,7 @@ def setup():
     run('cd %s; mkdir -p releases; mkdir -p packages; mkdir -p media' % env.path)
     deploy()
 
+@task
 def deploy():
     """
     Deploy the latest version of the site to the servers, install any
@@ -47,8 +52,10 @@ def deploy():
     install_site()
     symlink_current_release()
     migrate()
+    owner()
     restart_webserver()
 
+@task
 def deploy_version(version):
     "Specify a specific version to be made live"
     require('hosts', provided_by=[environment])
@@ -59,6 +66,7 @@ def deploy_version(version):
     run('ln -s %s releases/current' % env.version)
     restart_webserver()
 
+@task
 def rollback():
     """
     Limited rollback capability. Simple loads the previously current
@@ -74,27 +82,31 @@ def rollback():
 
 # Helpers. These are called by other functions rather than directly
 
+@task
 def upload_tar_from_git():
     require('release', provided_by=[deploy, setup])
     "Create an archive from the current Git master branch and upload it"
     local('git archive --format=tar master | gzip > %s.tar.gz' % env.release)
-    run('mkdir %s/releases/%s' % (env.path, env.release))
+    run('mkdir -p %s/releases/%s' % (env.path, env.release))
     put('%s.tar.gz' % env.release, '%s/packages/' % env.path)
     run('cd %s/releases/%s && tar zxf ../../packages/%s.tar.gz' % (env.path, env.release, env.release))
     local('rm %s.tar.gz' % env.release)
 
+@task
 def collect():
     "Collect static files"
     require('release', provided_by=[deploy, setup])
     require('path', provided_by=[environment])
     run('cd %s/releases/%s; source ../../env/bin/activate; ./manage.py collectstatic' % (env.path, env.release))
 
+@task
 def owner():
     "Set owner to web user"
     require('path', provided_by=[environment])
     sudo('chown -R http:http %s' % env.path)
     sudo('chmod -R g+w %s' % env.path)
 
+@task
 def install_site():
     "Add the virtualhost file to apache"
     require('release', provided_by=[deploy, setup])
@@ -103,8 +115,8 @@ def install_site():
     sudo('cp %s/releases/%s/%s.ini /etc/uwsgi/' % (env.path, env.release, env.project_name))
     sudo('systemctl enable uwsgi@%s' % env.project_name)
     collect()
-    owner()
 
+@task
 def install_requirements():
     "Install the required packages from the requirements file using pip"
     require('release', provided_by=[deploy, setup])
@@ -121,27 +133,31 @@ def sync():
     require('path', provided_by=[environment])
     run('cd %s/releases/current; source ../../env/bin/activate; ./manage.py syncdb' % env.path)
 
+@task
 def migrate():
     "Update the database"
     require('path', provided_by=[environment])
     run('cd %s/releases/current; source ../../env/bin/activate; ./manage.py makemigrations; ./manage.py migrate' % env.path)
 
+@task
 def restart_webserver():
     "Restart the web server"
     require('project_name', provided_by=[environment])
     sudo('systemctl restart uwsgi@%s' % env.project_name)
+    sudo('systemctl restart celery@%s' % env.project_name)
     sudo('systemctl reload nginx')
 
+@task
 def bootswatch():
     """
     Download and install bootswatch theme.
     """
-    require('project_name', provided_by=[environment])
     prompt('Theme:', key='theme')
+    current_project = os.getcwd().split('/')[-1]
     local('wget http://bootswatch.com/%s/bootstrap.min.css' % env.theme)
-    shutil.move('bootstrap.min.css', '%s/static/css/bootstrap.min.css' % env.project_name)
+    shutil.move('bootstrap.min.css', '%s/static/css/bootstrap.min.css' % current_project)
 
 @task
-def run(project):
+def dev(project):
     with prefix('source ~/.virtualenvs/%s/bin/activate' % project):
         local('./manage.py runserver --settings=%s.settings-dev' % project)
